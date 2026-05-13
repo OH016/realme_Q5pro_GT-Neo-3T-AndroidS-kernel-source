@@ -25,10 +25,7 @@ jobs:
             libncurses5-dev libssl-dev libelf-dev python3 python3-pip rsync bc \
             device-tree-compiler lz4 xz-utils zlib1g-dev openjdk-11-jdk gcc g++ \
             p7zip-full make repo cpio kmod
-          # 修复：使用Ubuntu 20.04归档源下载dwarves 1.20-1
-          wget https://old-releases.ubuntu.com/ubuntu/pool/universe/d/dwarves/dwarves_1.20-1_amd64.deb
-          sudo dpkg -i dwarves_1.20-1_amd64.deb
-          sudo apt-mark hold dwarves
+          # 已删除所有dwarves相关代码，彻底解决依赖问题
 
       - name: Cache Clang toolchain
         id: cache-clang
@@ -48,11 +45,19 @@ jobs:
           echo "KERNEL_VERSION=$(make kernelversion)" >> $GITHUB_ENV
           echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
 
+      - name: Configure kernel (disable BTF)
+        run: |
+          # 加载默认配置
+          make ARCH=arm64 vendor/kona-perf_defconfig
+          # 关键：关闭BTF功能，彻底绕过dwarves依赖
+          scripts/config --disable CONFIG_DEBUG_INFO_BTF
+          # 重新生成配置文件
+          make ARCH=arm64 olddefconfig
+
       - name: Build kernel
         run: |
           SKIP_MRPROPER=1 OUT_DIR=./out DIST_DIR=./dist \
           BUILD_CONFIG=build.config.aarch64 \
-          DEFCONFIG=vendor/kona-perf_defconfig \
           build/build.sh -j$(nproc)
 
       - name: Install kernel modules
