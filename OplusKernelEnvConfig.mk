@@ -1,3 +1,4 @@
+OPLUS_SKIP_ALL_FEATURES := y
 # Copyright (C), 2008-2030, OPPO Mobile Comm Corp., Ltd
 ### All rights reserved.
 ###
