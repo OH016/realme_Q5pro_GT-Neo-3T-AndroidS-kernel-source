@@ -1,0 +1,133 @@
+name: Build Kernel
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git-core gnupg flex bison build-essential zip curl \
+            libncurses5-dev libssl-dev libelf-dev python3 python3-pip rsync bc \
+            device-tree-compiler lz4 xz-utils zlib1g-dev openjdk-11-jdk gcc g++ \
+            p7zip-full make repo cpio kmod
+          # 强制安装dwarves 1.20-1版本
+          wget http://archive.ubuntu.com/ubuntu/pool/universe/d/dwarves/dwarves_1.20-1_amd64.deb
+          sudo dpkg -i dwarves_1.20-1_amd64.deb
+          sudo apt-mark hold dwarves # 锁定版本防止自动更新
+
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: clang-toolchain
+          key: ${{ runner.os }}-clang-r416183b
+
+      - name: Download Clang toolchain
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang-toolchain -b clang-r416183b
+
+      - name: Set up environment
+        run: |
+          echo "PATH=$(pwd)/clang-toolchain/bin:$PATH" >> $GITHUB_ENV
+          echo "KERNEL_VERSION=$(make kernelversion)" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+
+      - name: Build kernel
+        run: |
+          SKIP_MRPROPER=1 OUT_DIR=./out DIST_DIR=./dist \
+          BUILD_CONFIG=build.config.aarch64 \
+          DEFCONFIG=vendor/kona-perf_defconfig \
+          build/build.sh -j$(nproc)
+
+      - name: Install kernel modules
+        run: |
+          make ARCH=arm64 INSTALL_MOD_PATH=./modules_tmp modules_install
+          mkdir -p ./modules/vendor/lib/modules/
+          cp -r ./modules_tmp/lib/modules/$(make kernelrelease)/ ./modules/vendor/lib/modules/
+          mkdir -p ./modules/vendor_dlkm/lib/modules/
+
+      - name: Prepare AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/DespairFactor/AnyKernel3.git
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cp -r ./modules/* AnyKernel3/
+          
+          # 写入AnyKernel3配置
+          cat > AnyKernel3/anykernel.sh << 'EOF'
+          # AnyKernel3 Ramdisk Mod Script
+          # osm0sis @ xda-developers
+
+          ### AnyKernel setup
+          # begin properties
+          properties() {
+          kernel.string=MyKernel-${KERNEL_VERSION}-${BUILD_DATE}
+          kernel.version=1.0
+          device.name1=RMX3370
+          device.name2=RMX3372
+          do.devicecheck=1
+          do.modules=1
+          do.systemless=1
+          do.vendor_dlkm=1
+          vendor_dlkm=./modules/vendor_dlkm
+          do.cleanup=1
+          do.cleanup_on_error=1
+          }
+          # end properties
+
+          ### setup variables
+          block=/dev/block/bootdevice/by-name/boot
+          is_slot_device=0
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+
+          ### import functions
+          . tools/ak3-core.sh
+
+          ### main
+          dump_boot
+          split_boot
+          flash_boot
+          install_modules
+          write_boot
+          EOF
+          
+          # 替换变量
+          sed -i "s/\${KERNEL_VERSION}/${KERNEL_VERSION}/g" AnyKernel3/anykernel.sh
+          sed -i "s/\${BUILD_DATE}/${BUILD_DATE}/g" AnyKernel3/anykernel.sh
+
+      - name: Create flashable zip
+        run: |
+          cd AnyKernel3
+          zip -r9 ../MyKernel-${KERNEL_VERSION}-${BUILD_DATE}.zip * -x .git README.md *placeholder
+
+      - name: Upload kernel zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyKernel-${{ env.KERNEL_VERSION }}-${{ env.BUILD_DATE }}
+          path: MyKernel-${{ env.KERNEL_VERSION }}-${{ env.BUILD_DATE }}.zip
+          retention-days: 90
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MyKernel-${{ env.KERNEL_VERSION }}-${{ env.BUILD_DATE }}.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
